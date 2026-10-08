@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Tiro con Arco VR - Redmi Note 11 & VR Shinecon</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+        
+        /* Retículas de disparo en pantalla dividida */
+        .reticle {
+            position: absolute; top: 50%; width: 12px; height: 12px;
+            border: 2px solid #ffffff; border-radius: 50%;
+            transform: translate(-50%, -50%); pointer-events: none; z-index: 10; display: none;
+        }
+        .reticle-left { left: 25%; }
+        .reticle-right { left: 75%; }
+
+        .reticle-progress {
+            position: absolute; top: 50%; width: 24px; height: 24px;
+            border: 3px solid rgba(245, 158, 11, 0.3); border-top: 3px solid #f59e0b;
+            border-radius: 50%; transform: translate(-50%, -50%);
+            pointer-events: none; z-index: 9; display: none;
+        }
+        .progress-left { left: 25%; }
+        .progress-right { left: 75%; }
+    </style>
+</head>
+<body class="select-none bg-black">
+
+    <div id="canvas-container" class="w-full h-full"></div>
+
+    <!-- Puntos de mira dobles para cada lente -->
+    <div id="reticle-l" class="reticle reticle-left"></div>
+    <div id="reticle-r" class="reticle reticle-right"></div>
+    <div id="progress-l" class="reticle-progress progress-left"></div>
+    <div id="progress-r" class="reticle-progress progress-right"></div>
+
+    <!-- Menú de Inicio e Instrucciones -->
+    <div id="overlay" class="absolute inset-0 bg-slate-950/95 flex flex-col justify-center items-center p-6 text-center z-30">
+        <h1 class="text-3xl font-black text-amber-400 mb-2 tracking-wider">TIRO CON ARCO VR</h1>
+        <p class="text-xs text-emerald-300 mb-6 max-w-xs">Diseñado para Redmi Note 11 + VR Shinecon</p>
+
+        <div class="bg-slate-900/80 p-4 rounded-xl border border-emerald-500/30 max-w-xs mb-6 text-left text-xs text-slate-200 space-y-2">
+            <p>1️⃣ Activa la **Rotación Automática** en tu celular.</p>
+            <p>2️⃣ Pon tu celular en posición **Horizontal**.</p>
+            <p>3️⃣ Al presionar el botón, se activará la **Pantalla Completa** y la **Pantalla Dividida**.</p>
+        </div>
+
+        <button id="start-btn" class="w-full max-w-xs py-4 bg-amber-500 active:bg-amber-600 text-slate-950 font-black rounded-xl text-sm uppercase shadow-2xl transition transform active:scale-95">
+            🥽 ENTRAR EN MODO VR (3D STEREOSCOPIC)
+        </button>
+    </div>
+
+    <script>
+        let scene, camera, renderer;
+        let cameraL, cameraR;
+        let bowGroup, arrowMesh, targetGroup;
+        let activeArrows = [];
+        let isVR = false;
+
+        // Sensórica Giroscopio (DeviceOrientation)
+        let deviceQuaternion = new THREE.Quaternion();
+        let screenTransform = new THREE.Quaternion();
+        let worldTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+
+        // Puntero con la mirada (Gaze Auto-Shoot)
+        let raycaster = new THREE.Raycaster();
+        let gazeTimer = 0;
+
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0f291e);
+            scene.fog = new THREE.FogExp2(0x0f291e, 0.015);
+
+            // Cámara Base
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.6, 0);
+
+            // Cámaras Estereoscópicas para las dos lentes de los VR Shinecon
+            cameraL = new THREE.PerspectiveCamera(70, (window.innerWidth / 2) / window.innerHeight, 0.1, 1000);
+            cameraR = new THREE.PerspectiveCamera(70, (window.innerWidth / 2) / window.innerHeight, 0.1, 1000);
+            
+            // Distancia entre ojos (IPD)
+            cameraL.position.x = -0.035;
+            cameraR.position.x = 0.035;
+            camera.add(cameraL);
+            camera.add(cameraR);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // Luces y Entorno
+            const light = new THREE.DirectionalLight(0xffffff, 1.3);
+            light.position.set(10, 20, 10);
+            scene.add(light);
+            scene.add(new THREE.AmbientLight(0x404040, 0.8));
+
+            buildEnvironment();
+            buildBow();
+            buildTarget();
+
+            // Asignación del botón de inicio
+            document.getElementById('start-btn').addEventListener('click', startVRMode);
+
+            // Eventos del Girosocpio
+            window.addEventListener('resize', onResize);
+            window.addEventListener('orientationchange', updateScreenOrientation);
+
+            renderer.setAnimationLoop(animate);
+        }
+
+        function buildEnvironment() {
+            const groundGeo = new THREE.PlaneGeometry(100, 100);
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0x15803d });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            scene.add(ground);
+        }
+
+        function buildBow() {
+            bowGroup = new THREE.Group();
+            const bowGeo = new THREE.TorusGeometry(0.4, 0.015, 8, 24, Math.PI);
+            const bowMat = new THREE.MeshStandardMaterial({ color: 0x78350f });
+            const bowMesh = new THREE.Mesh(bowGeo, bowMat);
+            bowMesh.rotation.z = -Math.PI / 2;
+            bowGroup.add(bowMesh);
+
+            const arrowGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.7);
+            arrowGeo.rotateX(Math.PI / 2);
+            const arrowMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b });
+            arrowMesh = new THREE.Mesh(arrowGeo, arrowMat);
+            arrowMesh.position.z = -0.2;
+            bowGroup.add(arrowMesh);
+
+            bowGroup.position.set(0.15, -0.2, -0.5);
+            camera.add(bowGroup);
+            scene.add(camera);
+        }
+
+        function buildTarget() {
+            targetGroup = new THREE.Group();
+            const targetGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.1, 32);
+            targetGeo.rotateX(Math.PI / 2);
+            const targetMat = new THREE.MeshStandardMaterial({ color: 0xdc2626 });
+            const targetDisk = new THREE.Mesh(targetGeo, targetMat);
+            targetGroup.add(targetDisk);
+
+            targetGroup.position.set(0, 1.6, -12);
+            scene.add(targetGroup);
+        }
+
+        // Activación de Giroscopio + Pantalla Completa + Pantalla Dividida
+        function startVRMode() {
+            isVR = true;
+
+            // 1. Ocultar Menú y mostrar miras divididas
+            document.getElementById('overlay').classList.add('hidden');
+            document.getElementById('reticle-l').style.display = 'block';
+            document.getElementById('reticle-r').style.display = 'block';
+            document.getElementById('progress-l').style.display = 'block';
+            document.getElementById('progress-r').style.display = 'block';
+
+            // 2. SOLUCIÓN PROBLEMA 1: Forzar Pantalla Completa (Fullscreen API)
+            const docElm = document.documentElement;
+            if (docElm.requestFullscreen) {
+                docElm.requestFullscreen().catch(() => {});
+            } else if (docElm.webkitRequestFullscreen) {
+                docElm.webkitRequestFullscreen();
+            }
+
+            // Forzar bloqueo de orientación en horizontal
+            if (screen.orientation && screen.orientation.lock) {
+                screen.orientation.lock('landscape').catch(() => {});
+            }
+
+            // 3. SOLUCIÓN PROBLEMA 2: Activar Giroscopio Nativamente
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission().then(response => {
+                    if (response === 'granted') {
+                        window.addEventListener('deviceorientation', onDeviceOrientation, true);
+                    }
+                });
+            } else {
+                window.addEventListener('deviceorientation', onDeviceOrientation, true);
+            }
+
+            // Ajustar renderizado de pantalla
+            onResize();
+        }
+
+        // Corrección Matemática de la Cámara con Giroscopio en Redmi
+        function onDeviceOrientation(e) {
+            if (e.alpha === null) return;
+
+            const alpha = THREE.MathUtils.degToRad(e.alpha || 0);
+            const beta = THREE.MathUtils.degToRad(e.beta || 0);
+            const gamma = THREE.MathUtils.degToRad(e.gamma || 0);
+            const orient = window.orientation ? THREE.MathUtils.degToRad(window.orientation) : 0;
+
+            const euler = new THREE.Euler();
+            euler.set(beta, alpha, -gamma, 'YXZ');
+            deviceQuaternion.setFromEuler(euler);
+
+            screenTransform.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orient);
+            camera.quaternion.copy(deviceQuaternion).multiply(screenTransform).multiply(worldTransform);
+        }
+
+        function updateScreenOrientation() {
+            const orient = window.orientation ? THREE.MathUtils.degToRad(window.orientation) : 0;
+            screenTransform.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orient);
+        }
+
+        function shootArrow() {
+            const origin = new THREE.Vector3();
+            const dir = new THREE.Vector3();
+            camera.getWorldPosition(origin);
+            camera.getWorldDirection(dir);
+
+            const flightArrow = arrowMesh.clone();
+            flightArrow.position.copy(origin);
+            scene.add(flightArrow);
+
+            activeArrows.push({
+                mesh: flightArrow,
+                pos: origin.clone(),
+                vel: dir.multiplyScalar(24),
+                active: true,
+                life: 100
+            });
+        }
+
+        function updateArrows() {
+            const dt = 0.016;
+            const gravity = new THREE.Vector3(0, -9.8, 0);
+
+            for (let i = activeArrows.length - 1; i >= 0; i--) {
+                const arrow = activeArrows[i];
+                if (!arrow.active) continue;
+
+                arrow.vel.addScaledVector(gravity, dt);
+                arrow.pos.addScaledVector(arrow.vel, dt);
+                arrow.mesh.position.copy(arrow.pos);
+                arrow.mesh.lookAt(arrow.pos.clone().add(arrow.vel));
+
+                arrow.life--;
+                if (arrow.life <= 0 || arrow.pos.y <= 0) {
+                    scene.remove(arrow.mesh);
+                    activeArrows.splice(i, 1);
+                }
+            }
+        }
+
+        function checkGazeShoot() {
+            if (!isVR) return;
+
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(targetGroup.children);
+
+            const progL = document.getElementById('progress-l');
+            const progR = document.getElementById('progress-r');
+
+            if (intersects.length > 0) {
+                gazeTimer += 0.02;
+                const scale = 1 + gazeTimer * 0.8;
+                progL.style.transform = `translate(-50%, -50%) scale(${scale})`;
+                progR.style.transform = `translate(-50%, -50%) scale(${scale})`;
+
+                if (gazeTimer >= 1.2) {
+                    shootArrow();
+                    gazeTimer = 0;
+                }
+            } else {
+                gazeTimer = Math.max(0, gazeTimer - 0.04);
+                progL.style.transform = `translate(-50%, -50%) scale(1)`;
+                progR.style.transform = `translate(-50%, -50%) scale(1)`;
+            }
+        }
+
+        // SOLUCIÓN PROBLEMA 3: Renderizado Estereoscópico en 2 Pantallas
+        function animate() {
+            checkGazeShoot();
+            updateArrows();
+
+            if (isVR) {
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+
+                // Renderizar Ojo Izquierdo (Mitad Izquierda)
+                renderer.setViewport(0, 0, width / 2, height);
+                renderer.setScissor(0, 0, width / 2, height);
+                renderer.setScissorTest(true);
+                renderer.render(scene, cameraL);
+
+                // Renderizar Ojo Derecho (Mitad Derecha)
+                renderer.setViewport(width / 2, 0, width / 2, height);
+                renderer.setScissor(width / 2, 0, width / 2, height);
+                renderer.setScissorTest(true);
+                renderer.render(scene, cameraR);
+            } else {
+                renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+                renderer.setScissorTest(false);
+                renderer.render(scene, camera);
+            }
+        }
+
+        function onResize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+
+            cameraL.aspect = (width / 2) / height;
+            cameraL.updateProjectionMatrix();
+
+            cameraR.aspect = (width / 2) / height;
+            cameraR.updateProjectionMatrix();
+
+            renderer.setSize(width, height);
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
